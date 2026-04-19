@@ -198,10 +198,97 @@ use axum_extra::routing::RouterExt as _;
 use self::routing::ApiMethodRouter;
 use crate::transform::{TransformOpenApi, TransformPathItem};
 
+#[cfg(feature = "axum")]
+use crate::openapi::{ParameterData, ParameterSchemaOrContent, PathStyle};
+use crate::{openapi::Parameter, util::iter_operations_mut};
+
+#[cfg(feature = "axum")]
+use schemars::json_schema;
+
+#[cfg(feature = "axum")]
+use self::inputs::MATCHED_PATH_EXTENSION;
+
 mod inputs;
 mod outputs;
 
 pub mod routing;
+
+fn extract_path_parameter_names(path: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut current = String::new();
+    let mut in_param = false;
+
+    for ch in path.chars() {
+        match ch {
+            '{' if !in_param => {
+                in_param = true;
+                current.clear();
+            }
+            '}' if in_param => {
+                let normalized = current.trim().trim_start_matches('*');
+                if !normalized.is_empty() && !names.iter().any(|name| name == normalized) {
+                    names.push(normalized.to_string());
+                }
+                in_param = false;
+            }
+            _ if in_param => current.push(ch),
+            _ => {}
+        }
+    }
+
+    names
+}
+
+fn apply_path_template_parameters(path: &str, path_item: &mut PathItem) {
+    let path_parameter_names = extract_path_parameter_names(path);
+
+    for (_, operation) in iter_operations_mut(path_item) {
+        #[cfg(feature = "axum")]
+        {
+            let _ = operation.extensions.swap_remove(MATCHED_PATH_EXTENSION);
+        }
+
+        for parameter_name in &path_parameter_names {
+            let already_exists = operation.parameters.iter().any(|parameter| {
+                matches!(
+                    parameter,
+                    ReferenceOr::Item(Parameter::Path {
+                        parameter_data,
+                        style: _,
+                    }) if parameter_data.name == *parameter_name
+                )
+            });
+
+            if already_exists {
+                continue;
+            }
+
+            #[cfg(feature = "axum")]
+            operation
+                .parameters
+                .push(ReferenceOr::Item(Parameter::Path {
+                    parameter_data: ParameterData {
+                        name: parameter_name.clone(),
+                        description: None,
+                        required: true,
+                        format: ParameterSchemaOrContent::Schema(SchemaObject {
+                            json_schema: json_schema!({
+                                "type": "string",
+                            }),
+                            example: None,
+                            external_docs: None,
+                        }),
+                        extensions: Default::default(),
+                        deprecated: None,
+                        example: None,
+                        examples: Default::default(),
+                        explode: None,
+                    },
+                    style: PathStyle::Simple,
+                }));
+        }
+    }
+}
 
 #[cfg(all(feature = "macros", feature = "axum-extra-typed-routing"))]
 pub use aide_macros::axum_typed_path as typed_path;
@@ -300,7 +387,8 @@ where
     #[tracing::instrument(skip_all, fields(path = path))]
     pub fn api_route(mut self, path: &str, mut method_router: ApiMethodRouter<S>) -> Self {
         in_context(|ctx| {
-            let new_path_item = method_router.take_path_item();
+            let mut new_path_item = method_router.take_path_item();
+            apply_path_template_parameters(path, &mut new_path_item);
 
             if let Some(path_item) = self.paths.get_mut(path) {
                 merge_paths(ctx, path, path_item, new_path_item);
@@ -323,7 +411,8 @@ where
     #[tracing::instrument(skip_all, fields(path = path))]
     pub fn api_route_with_tsr(mut self, path: &str, mut method_router: ApiMethodRouter<S>) -> Self {
         in_context(|ctx| {
-            let new_path_item = method_router.take_path_item();
+            let mut new_path_item = method_router.take_path_item();
+            apply_path_template_parameters(path, &mut new_path_item);
 
             if let Some(path_item) = self.paths.get_mut(path) {
                 merge_paths(ctx, path, path_item, new_path_item);
@@ -352,6 +441,8 @@ where
     ) -> Self {
         in_context(|ctx| {
             let mut p = method_router.take_path_item();
+            apply_path_template_parameters(path, &mut p);
+
             let t = transform(TransformPathItem::new(&mut p));
 
             if !t.hidden {
@@ -384,6 +475,8 @@ where
     ) -> Self {
         in_context(|ctx| {
             let mut p = method_router.take_path_item();
+            apply_path_template_parameters(path, &mut p);
+
             let t = transform(TransformPathItem::new(&mut p));
 
             if !t.hidden {
@@ -485,9 +578,12 @@ where
         in_context(|_ctx| {
             if let Some(path_item) = self.paths.get_mut(path) {
                 docs.apply_to_path_item(path_item);
+                apply_path_template_parameters(path, path_item);
             } else {
                 let mut path_item = PathItem::default();
                 docs.apply_to_path_item(&mut path_item);
+                apply_path_template_parameters(path, &mut path_item);
+
                 self.paths.insert(path.into(), path_item);
             }
         });
@@ -511,10 +607,14 @@ where
             let mut path_item = if let Some(existing) = self.paths.get_mut(path) {
                 let mut new_item = existing.clone();
                 docs.apply_to_path_item(&mut new_item);
+                apply_path_template_parameters(path, &mut new_item);
+
                 new_item
             } else {
                 let mut new_item = PathItem::default();
                 docs.apply_to_path_item(&mut new_item);
+                apply_path_template_parameters(path, &mut new_item);
+
                 new_item
             };
             let _ = transform(TransformPathItem::new(&mut path_item));
@@ -890,12 +990,19 @@ where
 #[allow(clippy::unused_async)]
 mod tests {
     use crate::axum::{routing, ApiRouter};
+    #[cfg(feature = "axum")]
+    use crate::openapi::{Parameter, ReferenceOr};
     use axum::{extract::State, handler::Handler};
 
     async fn test_handler1(State(_): State<TestState>) {}
     async fn test_handler2(State(_): State<u8>) {}
 
     async fn test_handler3() {}
+    #[cfg(feature = "axum")]
+    async fn test_handler5(_id: axum::extract::Path<u32>) {}
+
+    #[cfg(feature = "axum-matched-path")]
+    async fn test_handler4(_matched_path: axum::extract::MatchedPath) {}
 
     #[cfg(feature = "axum-json")]
     #[test]
@@ -1009,5 +1116,68 @@ mod tests {
             "/test-route",
             routing::get(test_handler3.layer(tower_layer::Identity::new())),
         );
+    }
+
+    #[cfg(feature = "axum")]
+    #[test]
+    fn test_path_template_generates_path_parameters_without_matched_path() {
+        let app: ApiRouter = ApiRouter::new().api_route("/users/{id}", routing::get(test_handler5));
+
+        let operation = app
+            .paths
+            .get("/users/{id}")
+            .and_then(|path| path.get.as_ref())
+            .expect("expected GET operation for /users/{id}");
+
+        let path_params = operation
+            .parameters
+            .iter()
+            .filter_map(|parameter| match parameter {
+                ReferenceOr::Item(Parameter::Path {
+                    parameter_data,
+                    style: _,
+                }) => Some(parameter_data),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(path_params.len(), 1);
+        assert_eq!(path_params[0].name, "id");
+        assert!(path_params[0].required);
+    }
+
+    #[cfg(feature = "axum-matched-path")]
+    #[test]
+    fn test_matched_path_generates_path_parameters() {
+        let app: ApiRouter = ApiRouter::new().api_route("/users/{id}", routing::get(test_handler4));
+
+        let operation = app
+            .paths
+            .get("/users/{id}")
+            .and_then(|path| path.get.as_ref())
+            .expect("expected GET operation for /users/{id}");
+
+        assert!(
+            !operation
+                .extensions
+                .contains_key(super::MATCHED_PATH_EXTENSION),
+            "internal matched-path marker must not leak into generated OpenAPI"
+        );
+
+        let path_params = operation
+            .parameters
+            .iter()
+            .filter_map(|parameter| match parameter {
+                ReferenceOr::Item(Parameter::Path {
+                    parameter_data,
+                    style: _,
+                }) => Some(parameter_data),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(path_params.len(), 1);
+        assert_eq!(path_params[0].name, "id");
+        assert!(path_params[0].required);
     }
 }
