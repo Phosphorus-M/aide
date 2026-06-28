@@ -21,8 +21,6 @@ use crate::{
 };
 
 #[cfg(feature = "axum")]
-pub(crate) const MATCHED_PATH_EXTENSION: &str = "x-aide-axum-matched-path";
-#[cfg(feature = "axum")]
 pub(crate) const PATH_INPUT_SCHEMA_EXTENSION: &str = "x-aide-axum-path-input-schema";
 
 impl<T> OperationInput for Extension<T> {}
@@ -33,16 +31,11 @@ impl OperationInput for RawQuery {}
 
 #[cfg(feature = "axum-tokio")]
 impl<T> OperationInput for axum::extract::ConnectInfo<T> {}
-#[cfg(feature = "axum-matched-path")]
-impl OperationInput for axum::extract::MatchedPath {
-    fn operation_input(_ctx: &mut crate::generate::GenContext, operation: &mut Operation) {
-        operation
-            .extensions
-            .insert(MATCHED_PATH_EXTENSION.to_string(), json!(true));
-    }
-}
 #[cfg(feature = "axum-original-uri")]
 impl OperationInput for axum::extract::OriginalUri {}
+
+#[cfg(feature = "axum-matched-path")]
+impl OperationInput for axum::extract::MatchedPath {}
 
 #[cfg(feature = "axum-extra-headers")]
 impl<T> OperationInput for axum_extra::typed_header::TypedHeader<T>

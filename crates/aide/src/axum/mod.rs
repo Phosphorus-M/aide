@@ -209,7 +209,7 @@ use schemars::{json_schema, Schema};
 use serde_json::Value;
 
 #[cfg(feature = "axum")]
-use self::inputs::{MATCHED_PATH_EXTENSION, PATH_INPUT_SCHEMA_EXTENSION};
+use self::inputs::PATH_INPUT_SCHEMA_EXTENSION;
 
 mod inputs;
 mod outputs;
@@ -285,8 +285,6 @@ fn apply_path_template_parameters(path: &str, path_item: &mut PathItem) {
                 .swap_remove(PATH_INPUT_SCHEMA_EXTENSION)
                 .map(|schema| extract_positional_path_schemas(&schema))
                 .unwrap_or_default();
-
-            let _ = operation.extensions.swap_remove(MATCHED_PATH_EXTENSION);
 
             for (parameter_index, parameter_name) in path_parameter_names.iter().enumerate() {
                 let already_exists = operation.parameters.iter().any(|parameter| {
@@ -1246,13 +1244,6 @@ mod tests {
             .get("/users/{id}")
             .and_then(|path| path.get.as_ref())
             .expect("expected GET operation for /users/{id}");
-
-        assert!(
-            !operation
-                .extensions
-                .contains_key(super::MATCHED_PATH_EXTENSION),
-            "internal matched-path marker must not leak into generated OpenAPI"
-        );
 
         let path_params = operation
             .parameters
